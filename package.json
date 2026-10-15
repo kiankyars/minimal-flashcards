@@ -1,0 +1,23 @@
+{
+  "name": "minimal-flashcards",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A small, note-native Obsidian flashcard reviewer.",
+  "scripts": {
+    "build": "tsc --noEmit && node esbuild.config.mjs",
+    "test": "tsx --test tests/*.test.ts",
+    "check": "npm test && npm run build"
+  },
+  "dependencies": {
+    "ts-fsrs": "5.4.2"
+  },
+  "devDependencies": {
+    "@types/jsdom": "30.0.0",
+    "@types/node": "22.19.15",
+    "esbuild": "0.28.2",
+    "jsdom": "30.1.2",
+    "obsidian": "1.14.4",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

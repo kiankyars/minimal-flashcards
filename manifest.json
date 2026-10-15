@@ -1,0 +1,9 @@
+{
+  "id": "minimal-flashcards",
+  "name": "Minimal Flashcards",
+  "version": "0.1.0",
+  "minAppVersion": "1.8.7",
+  "description": "Open your due cards and review them with FSRS.",
+  "author": "Kian",
+  "isDesktopOnly": true
+}
