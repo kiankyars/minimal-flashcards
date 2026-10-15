@@ -38,29 +38,33 @@ async function until(predicate: () => boolean): Promise<void> {
     assert.ok(predicate(), "reviewer did not reach the expected state");
 }
 
-function setup(t: TestContext, source = "#flashcards\n\nFirst::First answer\n\nSecond::Second answer\n") {
+function setup(t: TestContext, source: string | Record<string, string> = "#flashcards\n\nFirst::First answer\n\nSecond::Second answer\n") {
     const dom = new JSDOM("<!doctype html><body></body>");
     Object.assign(globalThis, { window: dom.window, document: dom.window.document });
     host.installElementHelpers(dom.window);
     host.notices.length = 0;
-    const file = new host.TFile("cards.md");
+    const notes = new Map(Object.entries(typeof source === "string" ? { "cards.md": source } : source));
+    const files = [...notes.keys()].map((path) => new host.TFile(path));
+    const file = files[0];
     const writes: Array<{ before: string; after?: string }> = [];
     const openedFiles: Array<{ file: Host.TFile; options: unknown }> = [];
-    let text = source;
     let gate: Promise<void> | undefined;
+    let readGate: Promise<void> | undefined;
     let failure: Error | undefined;
     const app = {
         metadataCache: { getFileCache: () => null },
         vault: {
-            getMarkdownFiles: () => [file],
-            cachedRead: async () => text,
-            getFileByPath: (path: string) => path === file.path ? file : null,
-            process: async (_file: Host.TFile, transform: (text: string) => string) => {
+            getMarkdownFiles: () => files,
+            cachedRead: async (file: Host.TFile) => { await readGate; return notes.get(file.path)!; },
+            getFileByPath: (path: string) => files.find((file) => file.path === path) ?? null,
+            process: async (file: Host.TFile, transform: (text: string) => string) => {
+                let text = notes.get(file.path)!;
                 const write: (typeof writes)[number] = { before: text };
                 writes.push(write);
                 await gate;
                 if (failure) { const error = failure; failure = undefined; throw error; }
                 text = transform(text);
+                notes.set(file.path, text);
                 write.after = text;
                 return text;
             },
@@ -87,14 +91,20 @@ function setup(t: TestContext, source = "#flashcards\n\nFirst::First answer\n\nS
     };
     return {
         plugin, writes, openedFiles, current, button,
-        source: () => text,
-        replaceSource: (value: string) => { text = value; },
+        source: (path = file.path) => notes.get(path)!,
+        replaceSource: (value: string) => { notes.set(file.path, value); },
         blockWrite: (promise: Promise<void>) => { gate = promise; },
+        blockRead: (promise: Promise<void>) => { readGate = promise; },
         failWrite: (error: Error) => { failure = error; },
         body: () => current().contentEl.querySelector(".mf-body")?.textContent,
         async open() {
             plugin.commands[0].callback();
             await until(() => host.openedModals.length === 1 && !!host.openedModals[0].contentEl.querySelector(".mf-actions, .mf-empty"));
+        },
+        async chooseDeck() {
+            plugin.commands[1].callback();
+            await until(() => host.openedModals.some((modal) => modal instanceof host.FuzzySuggestModal));
+            return host.openedModals.find((modal) => modal instanceof host.FuzzySuggestModal) as Host.FuzzySuggestModal<string>;
         },
         async reveal() {
             button("Show answer").click();
@@ -105,7 +115,10 @@ function setup(t: TestContext, source = "#flashcards\n\nFirst::First answer\n\nS
 
 test("Review all opens a card directly with one native close control and full RemNote labels", async (t) => {
     const ui = setup(t);
-    assert.deepEqual(ui.plugin.commands.map(({ id, name }) => ({ id, name })), [{ id: "review-all", name: "Review all cards" }]);
+    assert.deepEqual(ui.plugin.commands.map(({ id, name }) => ({ id, name })), [
+        { id: "review-all", name: "Review all cards" },
+        { id: "review-deck", name: "Review a specific deck" },
+    ]);
     await ui.open();
     assert.equal(ui.body(), "First");
     assert.deepEqual([...ui.current().contentEl.querySelectorAll("button")].map((button) => button.textContent), ["Open note", "Delete", "Show answer"]);
@@ -117,6 +130,105 @@ test("Review all opens a card directly with one native close control and full Re
         "Forgot", "Partially recalled", "Recalled with effort", "Easily recalled",
     ]);
     assert.equal(ui.writes.length, 0);
+});
+
+test("the ribbon reviews all cards immediately, while canceling the native deck picker starts no review", async (t) => {
+    const ui = setup(t, "#flashcards/chips/process\n\nFirst::Answer\n");
+    const chooser = await ui.chooseDeck();
+    assert.equal(chooser.inputEl.placeholder, "Search decks…");
+    assert.deepEqual(chooser.getItems(), ["#flashcards/chips", "#flashcards/chips/process"]);
+    assert.equal(chooser.getItemText("#flashcards/chips/process"), "chips/process");
+    assert.equal(chooser.contentEl.querySelector(".mf-body"), null);
+    chooser.close();
+    await new Promise((done) => setTimeout(done, 0));
+    assert.equal(host.openedModals.length, 0);
+    ui.plugin.ribbons[0]();
+    await until(() => host.openedModals.length === 1 && ui.body() === "First");
+    assert.equal(ui.current().titleEl.textContent, "Flashcards");
+    assert.equal(ui.writes.length, 0);
+});
+
+test("a selected parent deck includes direct and descendant notes, excludes prefix lookalikes, and stays filtered after writes", async (t) => {
+    const ui = setup(t, {
+        "other.md": "#flashcards/other\n\nUnrelated::Answer\n",
+        "similar.md": "#flashcards/chipsmith\n\nUnrelated prefix::Answer\n",
+        "parent.md": "#flashcards/chips\n\nParent::Answer\n",
+        "child.md": "#flashcards/chips/process\n\nChild::Answer\n",
+        "fake.md": "#flashcards\n<!-- #flashcards/hidden -->\n`#flashcards/code`\n\nOther root card::Answer\n",
+    });
+    const chooser = await ui.chooseDeck();
+    assert.deepEqual(chooser.getItems(), ["#flashcards/chips", "#flashcards/chips/process", "#flashcards/chipsmith", "#flashcards/other"]);
+    chooser.onChooseItem("#flashcards/chips");
+    await until(() => host.openedModals.length === 1 && ui.body() === "Parent");
+    assert.equal(ui.current().titleEl.textContent, "Flashcards · chips");
+    assert.equal(ui.current().contentEl.querySelector(".mf-count")?.textContent, "0 due · 2 new");
+    ui.button("Delete").click();
+    await until(() => ui.body() === "Child");
+    ui.button("Delete").click();
+    await until(() => !!ui.current().contentEl.querySelector(".mf-empty"));
+    assert.equal(ui.writes.length, 2);
+    assert.match(ui.source("other.md"), /Unrelated::Answer/);
+    assert.match(ui.source("similar.md"), /Unrelated prefix::Answer/);
+    assert.match(ui.source("fake.md"), /Other root card::Answer/);
+});
+
+test("a deleted question that removes the selected deck tag does not reload cards from another deck", async (t) => {
+    const ui = setup(t, "#flashcards/other\n\n#flashcards/chips Question::Answer\n\nOther::Answer\n");
+    const chooser = await ui.chooseDeck();
+    chooser.onChooseItem("#flashcards/chips");
+    await until(() => host.openedModals.length === 1 && ui.body() === "#flashcards/chips Question");
+    ui.button("Delete").click();
+    await until(() => !!ui.current().contentEl.querySelector(".mf-empty"));
+    assert.equal(ui.source(), "#flashcards/other\n\nOther::Answer\n");
+});
+
+test("switching from a selected deck to all cards waits for a pending save and opens one fresh reviewer", async (t) => {
+    const ui = setup(t, {
+        "other.md": "#flashcards/other\n\nOther::Answer\n",
+        "chips.md": "#flashcards/chips\n\nChip::Answer\n\nNext chip::Answer\n",
+    });
+    const chooser = await ui.chooseDeck();
+    chooser.onChooseItem("#flashcards/chips");
+    await until(() => host.openedModals.length === 1 && ui.body() === "Chip");
+    const reviewer = ui.current();
+    const waiting = deferred();
+    ui.blockWrite(waiting.promise);
+    ui.button("Delete").click();
+    ui.plugin.commands[0].callback();
+    await new Promise((done) => setTimeout(done, 0));
+    assert.equal(ui.current(), reviewer);
+    assert.equal(ui.current().titleEl.textContent, "Flashcards · chips");
+    waiting.resolve();
+    await until(() => host.openedModals.length === 1 && ui.current() !== reviewer && ui.body() === "Other");
+    assert.equal(ui.current().titleEl.textContent, "Flashcards");
+    assert.equal(ui.current().contentEl.querySelector(".mf-count")?.textContent, "0 due · 2 new");
+    assert.equal(ui.writes.length, 1);
+    assert.equal(ui.source("chips.md"), "#flashcards/chips\n\nNext chip::Answer\n");
+});
+
+test("canceling a picker preserves an open reviewer, and unloading closes both", async (t) => {
+    const ui = setup(t, "#flashcards/chips\n\nFirst::Answer\n");
+    await ui.open();
+    const reviewer = ui.current();
+    const chooser = await ui.chooseDeck();
+    assert.equal(host.openedModals.length, 2);
+    chooser.close();
+    assert.equal(ui.current(), reviewer);
+    await ui.chooseDeck();
+    ui.plugin.onunload();
+    assert.equal(host.openedModals.length, 0);
+});
+
+test("unloading while deck discovery reads notes prevents a late picker from opening", async (t) => {
+    const ui = setup(t, "#flashcards/chips\n\nFirst::Answer\n");
+    const waiting = deferred();
+    ui.blockRead(waiting.promise);
+    ui.plugin.commands[1].callback();
+    await new Promise((done) => setTimeout(done, 0));
+    ui.plugin.onunload();
+    waiting.resolve();
+    await new Promise((done) => setTimeout(done, 0));
+    assert.equal(host.openedModals.length, 0);
 });
 
 test("rating shortcuts require a revealed answer and ignore key repeats", async (t) => {

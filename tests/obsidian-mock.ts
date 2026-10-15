@@ -71,6 +71,16 @@ export class Modal {
     onClose(): void {}
 }
 
+export abstract class FuzzySuggestModal<T> extends Modal {
+    inputEl = document.createElement("input");
+    emptyStateText = "";
+    abstract getItems(): T[];
+    abstract getItemText(item: T): string;
+    abstract onChooseItem(item: T): void;
+    setPlaceholder(text: string): void { this.inputEl.placeholder = text; }
+    onOpen(): void { this.contentEl.append(this.inputEl); }
+}
+
 export class Notice {
     constructor(message: string, _duration?: number) { notices.push(message); }
 }

@@ -89,9 +89,13 @@ function withoutComments(text: string): string {
     return text;
 }
 
-export function isFlashcardNote(text: string): boolean {
+export function flashcardTags(text: string): string[] {
     const visible = scanText(text).lines.map((line) => line.scan).join("\n");
-    return /(?:^|[\s(])#flashcards(?:\/[\p{L}\p{N}_-]+)*(?=$|[\s),.;!?])/mu.test(visible);
+    return [...new Set([...visible.matchAll(/(?:^|[\s(])(#flashcards(?:\/[\p{L}\p{N}_-]+)*)(?=$|[\s),.;!?])/gmu)].map((match) => match[1]))];
+}
+
+export function isFlashcardNote(text: string, deck = "#flashcards"): boolean {
+    return flashcardTags(text).some((tag) => tag === deck || tag.startsWith(`${deck}/`));
 }
 
 /** Parse question blocks; note eligibility is checked separately by the caller. */

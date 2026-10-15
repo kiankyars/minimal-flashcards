@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { deleteQuestion, isFlashcardNote, parseQuestions, updateSchedules } from "../src/cards";
+import { deleteQuestion, flashcardTags, isFlashcardNote, parseQuestions, updateSchedules } from "../src/cards";
 
 const first = "!fsrs,2030-01-01,2,1.2,4,2,3,0,0,2029-12-30";
 const second = "!fsrs,2030-01-03,4,2.4,5,2,2,0,0,2029-12-30";
@@ -11,6 +11,16 @@ test("note eligibility respects tag boundaries and ignores comments and code", (
     assert.equal(isFlashcardNote("Some prose (#flashcards)."), true);
     assert.equal(isFlashcardNote("#flashcards-other\n"), false);
     assert.equal(isFlashcardNote("<!-- #flashcards -->\n`#flashcards`\n```\n#flashcards\n```"), false);
+});
+
+test("deck tags use visible syntax, deduplicate tags and match descendants at a slash boundary", () => {
+    const text = "#flashcards/chips/process #flashcards/chips/process (#flashcards/memory).\n`#flashcards/fake`\n<!-- #flashcards/hidden -->\n```\n#flashcards/code\n```";
+    assert.deepEqual(flashcardTags(text), ["#flashcards/chips/process", "#flashcards/memory"]);
+    assert.equal(isFlashcardNote(text, "#flashcards/chips"), true);
+    assert.equal(isFlashcardNote(text, "#flashcards/chips/process"), true);
+    assert.equal(isFlashcardNote(text, "#flashcards/chip"), false);
+    assert.equal(isFlashcardNote(text, "#flashcards/chips/process/fab"), false);
+    assert.equal(isFlashcardNote("#flashcards/chips-extra", "#flashcards/chips"), false);
 });
 
 test("basic questions retain exact CRLF source offsets and heading context", () => {

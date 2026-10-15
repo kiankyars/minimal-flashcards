@@ -1,29 +1,62 @@
-import { Component, getAllTags, MarkdownRenderer, Modal, Notice, Plugin, TFile } from "obsidian";
-import { deleteQuestion, isFlashcardNote, updateSchedules } from "./cards";
+import { Component, FuzzySuggestModal, getAllTags, MarkdownRenderer, Modal, Notice, Plugin, TFile, type App } from "obsidian";
+import { deleteQuestion, flashcardTags, isFlashcardNote, updateSchedules } from "./cards";
 import { cardsFromNote, readyCards, type ReviewCard } from "./queue";
 import { formatInterval, preview, readSchedule, REMNOTE_RATINGS, State, writeSchedule, type Grade } from "./scheduler";
 
 export default class MinimalFlashcards extends Plugin {
     private reviewer?: Reviewer;
+    private chooser?: DeckPicker;
     private pendingWrite?: Promise<void>;
+    private request = 0;
+    private unloaded = false;
 
     onload(): void {
         this.addCommand({ id: "review-all", name: "Review all cards", callback: () => void this.openReviewer() });
+        this.addCommand({ id: "review-deck", name: "Review a specific deck", callback: () => void this.chooseDeck() });
         this.addRibbonIcon("layers", "Review all cards", () => void this.openReviewer());
     }
 
     onunload(): void {
+        this.unloaded = true;
+        this.request++;
+        this.chooser?.close();
         this.reviewer?.close();
     }
 
-    private async openReviewer(): Promise<void> {
+    private async openReviewer(deck?: string): Promise<void> {
+        const request = ++this.request;
+        this.chooser?.close();
         try {
             await this.pendingWrite;
-            if (this.reviewer) return;
-            this.reviewer = new Reviewer(this);
+            if (this.unloaded || request !== this.request || (this.reviewer && this.reviewer.deck === deck)) return;
+            this.reviewer?.close();
+            this.reviewer = new Reviewer(this, deck);
             this.reviewer.open();
         } catch (error) {
-            this.report(error);
+            if (!this.unloaded && request === this.request) this.report(error);
+        }
+    }
+
+    private async chooseDeck(): Promise<void> {
+        if (this.chooser) return;
+        const request = ++this.request;
+        try {
+            await this.pendingWrite;
+            if (this.unloaded || request !== this.request) return;
+            const tags = await Promise.all(flashcardFiles(this.app).map(async (file) => flashcardTags(await this.app.vault.cachedRead(file))));
+            if (this.unloaded || request !== this.request) return;
+            const decks = new Set<string>();
+            for (const tag of tags.flat()) {
+                const parts = tag.split("/");
+                for (let length = 2; length <= parts.length; length++) decks.add(parts.slice(0, length).join("/"));
+            }
+            const chooser = new DeckPicker(this.app, [...decks].sort(), (deck) => void this.openReviewer(deck), () => {
+                if (this.chooser === chooser) this.chooser = undefined;
+            });
+            this.chooser = chooser;
+            chooser.open();
+        } catch (error) {
+            if (!this.unloaded && request === this.request) this.report(error);
         }
     }
 
@@ -48,6 +81,32 @@ export default class MinimalFlashcards extends Plugin {
     }
 }
 
+function flashcardFiles(app: App, deck = "#flashcards"): TFile[] {
+    return app.vault.getMarkdownFiles().filter((file) => {
+        const cache = app.metadataCache.getFileCache(file);
+        return !cache || (getAllTags(cache) ?? []).some((tag) => tag === deck || tag.startsWith(`${deck}/`));
+    });
+}
+
+class DeckPicker extends FuzzySuggestModal<string> {
+    constructor(app: App, private decks: string[], private choose: (deck: string) => void, private dismiss: () => void) {
+        super(app);
+        this.setPlaceholder("Search decks…");
+        this.emptyStateText = "No decks found. Use #flashcards/deck-name in a note.";
+    }
+
+    getItems(): string[] { return this.decks; }
+    getItemText(deck: string): string { return deck.slice("#flashcards/".length); }
+    onChooseItem(deck: string): void {
+        this.close();
+        this.choose(deck);
+    }
+    onClose(): void {
+        super.onClose();
+        this.dismiss();
+    }
+}
+
 class Reviewer extends Modal {
     private cards: ReviewCard[] = [];
     private current?: ReviewCard;
@@ -58,7 +117,7 @@ class Reviewer extends Modal {
     private markdown?: Component;
     private wakeTimer?: number;
 
-    constructor(private plugin: MinimalFlashcards) {
+    constructor(private plugin: MinimalFlashcards, readonly deck?: string) {
         super(plugin.app);
         this.scope.register([], " ", (event) => {
             if (!event.repeat && !this.busy && !this.revealed && this.current) void this.reveal();
@@ -74,7 +133,7 @@ class Reviewer extends Modal {
 
     onOpen(): void {
         this.modalEl.addClass("minimal-flashcards");
-        this.titleEl.setText("Flashcards");
+        this.titleEl.setText(this.deck ? `Flashcards · ${this.deck.slice("#flashcards/".length)}` : "Flashcards");
         this.contentEl.setText("Loading cards…");
         void this.load();
     }
@@ -91,13 +150,10 @@ class Reviewer extends Modal {
     private async load(): Promise<void> {
         try {
             const now = new Date();
-            const files = this.app.vault.getMarkdownFiles().filter((file) => {
-                const cache = this.app.metadataCache.getFileCache(file);
-                return !cache || (getAllTags(cache) ?? []).some((tag) => tag === "#flashcards" || tag.startsWith("#flashcards/"));
-            });
+            const files = flashcardFiles(this.app, this.deck);
             const notes = await Promise.all(files.map(async (file) => {
                 const text = await this.app.vault.cachedRead(file);
-                if (!isFlashcardNote(text)) return [];
+                if (!isFlashcardNote(text, this.deck)) return [];
                 try {
                     return cardsFromNote(file.path, text, now);
                 } catch (error) {
@@ -213,7 +269,7 @@ class Reviewer extends Modal {
                     return transform(text, current, now);
                 });
                 this.cards = this.cards.filter((card) => card.path !== current.path);
-                if (isFlashcardNote(updated)) this.cards.push(...cardsFromNote(file.path, updated, now));
+                if (isFlashcardNote(updated, this.deck)) this.cards.push(...cardsFromNote(file.path, updated, now));
             });
             await this.advance();
         } catch (error) {

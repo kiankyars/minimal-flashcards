@@ -4,6 +4,8 @@ A small Obsidian extension for Kian. Mac only.
 
 Run **Minimal Flashcards: Review all cards** or click its ribbon icon. The first card opens immediately: due cards first, then new cards, with no daily cap or deck chooser.
 
+To review one deck, use **Minimal Flashcards: Review a specific deck** in the command palette (**Cmd+P**). Pick a deck by its existing `#flashcards/...` tag. Parent decks include their subdecks; choosing `chips` includes `chips/process`, for example.
+
 - **Space** reveals the answer.
 - **1–4** rate it: Forgot, Partially recalled, Recalled with effort, Easily recalled. Each button shows its next interval.
 - **Open note** opens the source at the question.
